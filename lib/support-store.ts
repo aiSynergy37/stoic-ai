@@ -1,4 +1,3 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
 
@@ -33,30 +32,74 @@ export type SupportConversation = {
   messages: SupportMessage[];
 };
 
-const storePath =
-  process.env.SUPPORT_STORE_PATH ||
-  path.join(/* turbopackIgnore: true */ process.cwd(), ".data", "support-conversations.json");
+type StoreAdapter = {
+  read: () => Promise<SupportConversation[]>;
+  write: (conversations: SupportConversation[]) => Promise<void>;
+};
 
-async function ensureStore() {
-  await mkdir(path.dirname(storePath), { recursive: true });
+let storeAdapterPromise: Promise<StoreAdapter> | null = null;
+let memoryStore: SupportConversation[] = [];
 
-  try {
-    await readFile(storePath, "utf8");
-  } catch {
-    await writeFile(storePath, "[]", "utf8");
+function getStorePath() {
+  return (
+    process.env.SUPPORT_STORE_PATH ||
+    path.join(/* turbopackIgnore: true */ process.cwd(), ".data", "support-conversations.json")
+  );
+}
+
+async function buildFileStoreAdapter(): Promise<StoreAdapter> {
+  const { mkdir, readFile, writeFile } = await import("fs/promises");
+  const storePath = getStorePath();
+
+  const ensureStore = async () => {
+    await mkdir(path.dirname(storePath), { recursive: true });
+
+    try {
+      await readFile(storePath, "utf8");
+    } catch {
+      await writeFile(storePath, "[]", "utf8");
+    }
+  };
+
+  return {
+    read: async () => {
+      await ensureStore();
+      const raw = await readFile(storePath, "utf8");
+      const parsed = JSON.parse(raw) as SupportConversation[];
+      return Array.isArray(parsed) ? parsed : [];
+    },
+    write: async (conversations) => {
+      await ensureStore();
+      await writeFile(storePath, JSON.stringify(conversations, null, 2), "utf8");
+    },
+  };
+}
+
+function buildMemoryStoreAdapter(): StoreAdapter {
+  return {
+    read: async () => memoryStore,
+    write: async (conversations) => {
+      memoryStore = conversations;
+    },
+  };
+}
+
+async function getStoreAdapter() {
+  if (!storeAdapterPromise) {
+    storeAdapterPromise = buildFileStoreAdapter().catch(() => buildMemoryStoreAdapter());
   }
+
+  return storeAdapterPromise;
 }
 
 async function readStore() {
-  await ensureStore();
-  const raw = await readFile(storePath, "utf8");
-  const parsed = JSON.parse(raw) as SupportConversation[];
-  return Array.isArray(parsed) ? parsed : [];
+  const adapter = await getStoreAdapter();
+  return adapter.read();
 }
 
 async function writeStore(conversations: SupportConversation[]) {
-  await ensureStore();
-  await writeFile(storePath, JSON.stringify(conversations, null, 2), "utf8");
+  const adapter = await getStoreAdapter();
+  await adapter.write(conversations);
 }
 
 function createMessage(author: SupportAuthor, text: string): SupportMessage {
